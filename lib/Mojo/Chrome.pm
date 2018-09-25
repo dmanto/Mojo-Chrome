@@ -38,7 +38,7 @@ sub detect_chrome_executable {
   my $path;
   $path = IPC::Cmd::can_run($_) and last
     for qw/google-chrome chrome.exe chromium-browser/;
-  return $path if $path && -f $path && -x _;
+  return $path if $path;
 
   if ($^O eq 'darwin') {
     $path = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
