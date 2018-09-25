@@ -3,13 +3,14 @@ use Mojo::Base -role;
 
 use Mojo::Chrome;
 use Mojo::Util;
-use Test2::API ();
-use Test::More ();
-
+use Test2::API   ();
+use Test::More   ();
+use Scalar::Util ();
 requires(qw/ua success/);
 
 has chrome => sub { Mojo::Chrome->new(base => shift->ua->server->nb_url) };
 has 'chrome_result';
+has wait_for_js_done => sub {3};
 
 my $_desc = sub { Mojo::Util::encode 'UTF-8', shift || shift };
 
@@ -20,11 +21,14 @@ sub chrome_load_ok {
 
   my $ok = 0;
   my $err;
-  $self->chrome->load_page($navigate, sub {
-    (undef, $err) = @_;
-    $ok = 1 unless $err;
-    Mojo::IOLoop->stop;
-  });
+  $self->chrome->load_page(
+    $navigate,
+    sub {
+      (undef, $err) = @_;
+      $ok = 1 unless $err;
+      Mojo::IOLoop->stop;
+    }
+  );
   Mojo::IOLoop->start;
 
   $ctx->diag($err) if $err;
@@ -40,17 +44,63 @@ sub chrome_evaluate_ok {
 
   my $ok = 0;
   my ($err, $result);
-  $self->chrome->evaluate($js, sub {
-    (undef, $err, $result) = @_;
-    $ok = 1 unless $err;
-    Mojo::IOLoop->stop;
-  });
+  $self->chrome->evaluate(
+    $js,
+    sub {
+      (undef, $err, $result) = @_;
+      $ok = 1 unless $err;
+      Mojo::IOLoop->stop;
+    }
+  );
   Mojo::IOLoop->start;
 
   $ctx->diag(Mojo::Util::dumper $err) if $err;
   $ctx->ok($ok, $desc);
   $ctx->release;
   return $self->chrome_result($result)->success($ok);
+}
+
+sub chrome_wait_for_text_is {
+  my ($self, $sel, $text, $desc) = @_;
+  $desc = $_desc->($desc, 'Chrome wait for text is');
+  my $ctx    = Test2::API::context();
+  my $rept   = 0.005;                            # 5 mS
+  my $tlimit = time + $self->wait_for_js_done;
+
+  my $ok = 0;
+  my ($err, $result);
+  my $jssel = qq!(document.querySelector('$sel') || []).innerText!;
+  my $loop;
+  $loop = sub {
+    $self->chrome->evaluate(
+      $jssel,
+      sub {
+        (undef, $err, $result) = @_;
+        if ($err) {
+          Mojo::IOLoop->stop;
+        }
+        elsif (defined $result && $result eq $text) {
+          $ok = 1;
+          Mojo::IOLoop->stop;
+        }
+        elsif (time > $tlimit) {    # timeout
+          $err = 'Result = ' . ($result // 'undef');
+          Mojo::IOLoop->stop;
+        }
+        else {
+          Mojo::IOLoop->timer($rept => $loop);
+        }
+      }
+    );
+  };
+  Mojo::IOLoop->next_tick($loop);
+  Mojo::IOLoop->start;
+  Scalar::Util::weaken $loop; # allow Mojo::Chrome instance to be garbage collected
+
+  $ctx->diag(Mojo::Util::dumper $err) if $err;
+  $ctx->ok($ok, $desc);
+  $ctx->release;
+  return $self->chrome_result($result);
 }
 
 sub chrome_result_is {
@@ -143,6 +193,17 @@ Defaults to a new instance with the L<Mojo::Chrome/base> set appropriately to ad
 
 The result of the previous call to L</chrome_evaluate_ok>.
 
+=head2 wait_for_js_done
+
+  my $wait_seconds = $t->wait_for_js_done;
+  $t               = $t->wait_for_js_done(5);
+
+Maximum amount of time in seconds to wait for javascript to
+modify required selector value. Used only on wait_for_xx methods.
+If the expected value (ok result) is obtained before, it returns
+inmediatelly without further delaying test execution.
+Default value is 3 seconds.
+
 =head1 METHODS
 
 L<Test::Mojo::Role::Chrome> composes the following methods into the consuming class.
@@ -186,6 +247,15 @@ Check a result, gotten from L</chrome_evaluate_ok> and stored in L</chrome_resul
 Takes an optional JSON Pointer, regex (C<qr//>) to compare against, and an optional description.
 If two arguments are passed those are assumed to be a pointer and a regex, to give a description without a pointer, use the root pointer C<''>.
 
+=head2 wait_for_text_is
+
+  $t = $t->chrome_result_like($selected, $expected);
+  $t = $t->chrome_result_like($selected, $expected, $description);
+
+Poll chrome browser until context (innerText) of $selector is equal to $expected (success case), or a timeout of
+L</wait_for_js_done> seconds expires (error case).
+The result is stored in L</chrome_result> (will be the same as $expected if the test succeds).
+
 =head1 SEE ALSO
 
 =over
@@ -201,4 +271,4 @@ Another front-end test system for the L<Test::Mojo> system
 Test non-Mojolicious PSGI applications using the L<Test::Mojo> system
 
 =back
-
+=cut

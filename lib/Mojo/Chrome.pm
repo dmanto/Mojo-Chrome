@@ -7,9 +7,10 @@ use 5.16.0;
 our $VERSION = '0.01';
 $VERSION = eval $VERSION;
 
-use Carp ();
-use IPC::Cmd ();
+use Carp       ();
+use IPC::Cmd   ();
 use List::Util ();
+use Mojo::File;
 use Mojo::IOLoop;
 use Mojo::IOLoop::Server;
 use Mojo::URL;
@@ -21,26 +22,28 @@ use constant DEBUG => $ENV{MOJO_CHROME_DEBUG};
 
 has [qw/tx/];
 has arguments => sub { ['--headless'] };
-has base => sub { Mojo::URL->new };
+has base      => sub { Mojo::URL->new };
 has executable => sub {
   shift->detect_chrome_executable()
     or Carp::croak 'executable not set and could not be determined';
 };
-has ua  => sub { Mojo::UserAgent->new };
+has ua     => sub { Mojo::UserAgent->new };
 has target => sub { Mojo::URL->new('http://127.0.0.1') };
 
 sub detect_chrome_executable {
+
   # class method, no args
   return $ENV{MOJO_CHROME_EXECUTABLE} if $ENV{MOJO_CHROME_EXECUTABLE};
 
-  my $path = IPC::Cmd::can_run 'google-chrome';
+  my $path;
+  $path = IPC::Cmd::can_run($_) and last
+    for qw/google-chrome chrome.exe chromium-browser/;
   return $path if $path && -f $path && -x _;
 
   if ($^O eq 'darwin') {
     $path = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
     return $path if $path && -f $path && -x _;
   }
-
   return undef;
 }
 
@@ -50,18 +53,23 @@ sub evaluate {
   my ($self, $js, $cb) = @_;
 
   # string value is a javascript expression
-  $js = { expression => $js, returnByValue => \1 } unless ref $js eq 'HASH';
+  $js = {expression => $js, returnByValue => \1} unless ref $js eq 'HASH';
 
-  $self->send_command('Runtime.evaluate', $js, sub {
-    my ($self, $err, $payload) = @_;
-    if ($err && !ref $err) {
-      $err = { exceptionId => -1, text => $err };
-    } elsif (exists $payload->{exceptionId}) {
-      $err = $payload;
+  $self->send_command(
+    'Runtime.evaluate',
+    $js,
+    sub {
+      my ($self, $err, $payload) = @_;
+      if ($err && !ref $err) {
+        $err = {exceptionId => -1, text => $err};
+      }
+      elsif (exists $payload->{exceptionId}) {
+        $err = $payload;
+      }
+      return $self->$cb($err, undef) if $err;
+      $self->$cb(undef, $payload->{result}{value});
     }
-    return $self->$cb($err, undef) if $err;
-    $self->$cb(undef, $payload->{result}{value});
-  });
+  );
 }
 
 # high level method to load a page
@@ -70,7 +78,7 @@ sub load_page {
   my ($self, $nav, $cb) = @_;
 
   # strings etc are url
-  $nav = { url => $nav } unless ref $nav eq 'HASH';
+  $nav = {url => $nav} unless ref $nav eq 'HASH';
 
   my $url = Mojo::URL->new("$nav->{url}");
   unless ($url->is_abs) {
@@ -81,7 +89,8 @@ sub load_page {
 
   Scalar::Util::weaken $self;
   Mojo::IOLoop->delay(
-    sub { $self->send_command('Page.enable', shift->begin) }, # ensure we get updates
+    sub { $self->send_command('Page.enable', shift->begin) }
+    ,    # ensure we get updates
     sub {
       my ($delay, $err) = @_;
       die $err if $err;
@@ -90,18 +99,20 @@ sub load_page {
     sub {
       my ($delay, $err, $result) = @_;
       die $err if $err;
-      die 'No frameId was received'
-        unless my $frame_id = $result->{frameId};
+      die 'No frameId was received' unless my $frame_id = $result->{frameId};
       my $end = $delay->begin(0);
-      $self->on('Page.frameStoppedLoading', sub {
-        my ($self, $params) = @_;
-        return unless $params->{frameId} = $frame_id;
-        $self->unsubscribe('Page.frameStoppedLoading', __SUB__);
-        $end->();
-      });
+      $self->on(
+        'Page.frameStoppedLoading',
+        sub {
+          my ($self, $params) = @_;
+          return unless $params->{frameId} = $frame_id;
+          $self->unsubscribe('Page.frameStoppedLoading', __SUB__);
+          $end->();
+        }
+      );
     },
     sub { $self->$cb(undef) },
-  )->catch(sub{ $self->$cb(pop) });
+  )->catch(sub { $self->$cb(pop) });
 }
 
 sub from_url {
@@ -122,11 +133,13 @@ sub from_url {
 
   # headless / no-headless
   $params->append('headless' => '')
-    unless defined $params->param('no-headless') || defined $params->param('headless');
+    unless defined $params->param('no-headless')
+    || defined $params->param('headless');
   $params->remove('no-headless');
 
   # arguments
-  my @options = List::Util::pairmap { "--$a" . (length $b ? "=$b" : '') } @{ $params->pairs };
+  my @options = List::Util::pairmap { "--$a" . (length $b ? "=$b" : '') }
+  @{$params->pairs};
   $self->arguments(\@options);
 
   return $self;
@@ -139,17 +152,18 @@ sub new {
 }
 
 sub send_command {
-  my $cb = ref $_[-1] eq 'CODE' ? pop : sub {};
+  my $cb = ref $_[-1] eq 'CODE' ? pop : sub { };
   my ($self, $method, $params) = @_;
-  my $payload = {
-    method => $method,
-    params => $params,
-  };
-  $self->_send($payload, sub {
-    my ($self, $error, $json) = @_;
-    # can errors come on the json result?
-    $self->$cb($error, $json ? $json->{result} : undef);
-  });
+  my $payload = {method => $method, params => $params,};
+  $self->_send(
+    $payload,
+    sub {
+      my ($self, $error, $json) = @_;
+
+      # can errors come on the json result?
+      $self->$cb($error, $json ? $json->{result} : undef);
+    }
+  );
 }
 
 sub _connect {
@@ -164,7 +178,7 @@ sub _connect {
       my $url = $self->target;
       return $delay->pass(undef) unless my $port = $url->port || $self->{port};
 
-      # otherwise try to connect to an existing chrome (perhaps one we've already spawned)
+# otherwise try to connect to an existing chrome (perhaps one we've already spawned)
       $url = $url->clone->port($port)->path('/json')->query('');
       say STDERR "Initial request to chrome: $url" if DEBUG;
       $self->ua->get($url, $delay->begin);
@@ -173,11 +187,12 @@ sub _connect {
       my ($delay, $tx) = @_;
 
       unless ($tx && $tx->success) {
+
         # die if we already tried to spawn chrome
         die 'Initial request to chrome failed' if $self->{pid};
 
         # otherwise try to spawn chrome then come back
-        return $self->_spawn(sub{
+        return $self->_spawn(sub {
           my ($self, $err) = @_;
           $err ? $self->$cb($err) : $self->_connect($cb);
         });
@@ -192,29 +207,34 @@ sub _connect {
       my (undef, $tx) = @_;
       Mojo::IOLoop->stream($tx->connection)->timeout(0);
 
-      $tx->on(json => sub {
-        my (undef, $payload) = @_;
-        print STDERR 'Received: ' . Mojo::Util::dumper $payload if DEBUG;
-        if (my $id = delete $payload->{id}) {
-          my $cb = delete $self->{cb}{$id};
-          return $self->emit(error => "callback not found: $id") unless $cb;
-          $self->$cb(undef, $payload);
-        } elsif (exists $payload->{method}) {
-          $self->emit(@{$payload}{qw/method params/});
-        } else {
-          $self->emit(error => 'message not understood', $payload);
+      $tx->on(
+        json => sub {
+          my (undef, $payload) = @_;
+          print STDERR 'Received: ' . Mojo::Util::dumper $payload if DEBUG;
+          if (my $id = delete $payload->{id}) {
+            my $cb = delete $self->{cb}{$id};
+            return $self->emit(error => "callback not found: $id") unless $cb;
+            $self->$cb(undef, $payload);
+          }
+          elsif (exists $payload->{method}) {
+            $self->emit(@{$payload}{qw/method params/});
+          }
+          else {
+            $self->emit(error => 'message not understood', $payload);
+          }
         }
-      });
+      );
       $tx->on(finish => sub { delete $self->{tx} });
       $self->tx($tx);
       $self->$cb(undef);
     },
-  )->catch(sub{ $self->$cb(pop) });
+  )->catch(sub { $self->$cb(pop) });
 }
 
 sub _kill {
   my ($self) = @_;
   return unless my $pid = delete $self->{pid};
+  $self->tx->finish if $self->tx;
   print STDERR "Killing $pid\n" if DEBUG;
   kill KILL => $pid;
   waitpid $pid, 0;
@@ -225,7 +245,7 @@ sub _kill {
 sub _send {
   my ($self, $payload, $cb) = @_;
 
-  return $self->_connect(sub{
+  return $self->_connect(sub {
     my ($self, $err) = @_;
     return $self->$cb($err, undef) if $err;
     $self->_send($payload, $cb);
@@ -246,34 +266,38 @@ sub _spawn {
   # once chrome has started up it will call this server
   # that call let's us know that it is up and going
   my $start_server = Mojo::Server::Daemon->new(silent => 1);
-  $start_server
-    ->app(Mojolicious->new)->app
-    ->tap(sub{$_->log->level('fatal')})
-    ->routes
-    ->get('/' => sub {
+  $start_server->app(Mojolicious->new)
+    ->app->tap(sub { $_->log->level('fatal') })->routes->get(
+    '/' => sub {
       my $c = shift;
       say STDERR 'Got start server request from chrome' if DEBUG;
       $c->tx->on(finish => sub { $self->$cb(undef); undef $start_server; });
       $c->rendered(204);
-    });
-  my $start_port = $start_server->listen(["http://127.0.0.1"])->start->ports->[0];
+    }
+    );
+  my $start_port
+    = $start_server->listen(["http://127.0.0.1"])->start->ports->[0];
 
   my $url  = $self->target->clone;
   my $port = $url->port;
   unless ($port) {
+
     # if the user didn't designate the port then generate one
     # we store it so that we can connect again later if the connection is lost
     # however it will be removed if the process is killed
     $port = $self->{port} = Mojo::IOLoop::Server->generate_port;
   }
 
-  my @command = ($self->executable, @{ $self->arguments }, "--remote-debugging-port=$port", "http://127.0.0.1:$start_port");
-  say STDERR 'Spawning: ' . (join ', ', map { "'$_'" } @command) if DEBUG;
+  my @command = (
+    $self->executable, @{$self->arguments}, "--disable-gpu",
+    "--remote-debugging-port=$port",
+    "http://127.0.0.1:$start_port"
+  );
+  say STDERR 'Spawning: ' . (join ', ', map {"'$_'"} @command) if DEBUG;
   $self->{pid} = open $self->{pipe}, '-|', @command;
-
   unless (defined $self->{pid}) {
     my $err = "Could not spawn chrome: $?";
-    Mojo::IOLoop->next_tick(sub{ $self->$cb($err) });
+    Mojo::IOLoop->next_tick(sub { $self->$cb($err) });
   }
 }
 
@@ -543,3 +567,5 @@ Joel Berger, E<lt>joel.a.berger@gmail.comE<gt>
 Copyright (C) 2017 by L</AUTHOR> and L</CONTRIBUTORS>.
 This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself.
+
+=cut
