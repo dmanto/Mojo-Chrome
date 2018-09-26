@@ -3,6 +3,7 @@ requires 'Mojolicious', '7.55'; # -role
 requires 'IPC::Cmd';
 requires 'Role::Tiny';
 requires 'Test::Simple', '1.302015'; # Test2
+requires 'Mojolicious::Plugin::AutoReload'; # chat example
 
 configure_requires 'IPC::Cmd';
 configure_requires 'Module::Build::Tiny';

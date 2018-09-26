@@ -294,7 +294,18 @@ sub _spawn {
     "http://127.0.0.1:$start_port"
   );
   say STDERR 'Spawning: ' . (join ', ', map {"'$_'"} @command) if DEBUG;
-  $self->{pid} = open $self->{pipe}, '-|', @command;
+
+  # $self->{pid} = open $self->{pipe}, '-|', @command;
+  if ($^O =~ /mswin/i) { $self->{pid} = system(1, @command) }
+  else {
+    $self->{pid} = fork();
+    if (defined $self->{pid} && !$self->{pid}) {    # we are the child
+      open(STDERR, "> /dev/null");
+      open(STDOUT, "> /dev/null");
+      exec @command;
+      exit 1;
+    }
+  }
   unless (defined $self->{pid}) {
     my $err = "Could not spawn chrome: $?";
     Mojo::IOLoop->next_tick(sub { $self->$cb($err) });
@@ -302,6 +313,7 @@ sub _spawn {
 }
 
 sub DESTROY {
+  print STDERR "Destroy, global phase: ${^GLOBAL_PHASE}\n" if DEBUG;
   return if defined ${^GLOBAL_PHASE} && ${^GLOBAL_PHASE} eq 'DESTRUCT';
   shift->_kill;
 }
