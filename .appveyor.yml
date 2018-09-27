@@ -9,5 +9,8 @@ install:
   - cd %APPVEYOR_BUILD_FOLDER%
   - cpanm --quiet --installdeps --with-develop --notest .
 
+build_script:
+  - perl Build.PL
+    
 test_script:
   - prove -lr
