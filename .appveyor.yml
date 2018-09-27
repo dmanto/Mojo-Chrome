@@ -10,7 +10,7 @@ install:
   - cpanm --quiet --installdeps --with-develop --notest .
 
 build_script:
-  - perl Build.PL
-    
+  - perl Build.PL && perl Build && perl Build test
+
 test_script:
   - prove -lr
