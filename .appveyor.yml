@@ -1,14 +1,13 @@
-skip_tags: true
-
 cache:
   - C:\strawberry
-  
-install:
-  - if not exist "C:\\strawberry" cinst --allow-empty-checksums strawberryperl
-  - cinst googlechrome
-  - set PATH=C:\strawberry\perl\bin;C:\strawberry\perl\site\bin;C:\strawberry\c\bin;%PATH%
-  - cd C:\projects\%APPVEYOR_PROJECT_NAME%
-  - cpanm --verbose --installdeps -n .
 
-build_script:
+install:
+  - if not exist "C:\strawberry" choco install strawberryperl -y
+  - if not exist "%PROGRAMFILES(x86)%\Google\Chrome\Application\chrome.exe" choco install googlechrome -y
+  - choco upgrade googlechrome -y
+  - set PATH=C:\strawberry\perl\bin;C:\strawberry\perl\site\bin;C:\strawberry\c\bin;%PROGRAMFILES(x86)%\Google\Chrome\Application;%PATH%
+  - cd %APPVEYOR_BUILD_FOLDER%
+  - cpanm --quiet --installdeps --with-develop --notest .
+
+test_script:
   - prove -lr
